@@ -1,1 +1,26 @@
-# Configuration file placeholder
+data:
+  path: "data/raw/nyc_taxi.csv"
+  value_column: "value"
+  train_ratio: 0.8
+
+model:
+  input_dim: 1
+  hidden_dim: 64
+  num_layers: 1
+
+training:
+  window_size: 10
+  batch_size: 64
+  epochs: 20
+  learning_rate: 0.001
+
+anomaly:
+  threshold_percentile: 95
+
+artifacts:
+  model_path: "model.pth"
+  scaler_path: "scaler.joblib"
+  threshold_path: "anomaly_threshold.npy"
+
+mlflow:
+  experiment_name: "time-series-anomaly-detection"
