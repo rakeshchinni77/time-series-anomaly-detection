@@ -1,0 +1,35 @@
+# Environments
+.venv/
+venv/
+env/
+ENV/
+
+# Environment Variables (Keep .env local, track .env.example)
+.env
+
+# Python Bytecode & Cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# IDE & Editor Settings
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS Generated
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Explicitly ensure required artifacts and raw data are tracked
+!model.pth
+!scaler.joblib
+!anomaly_threshold.npy
+!data/raw/nyc_taxi.csv
