@@ -1,21 +1,25 @@
 """
-Training and Artifact Persistence Pipeline for Time-Series Anomaly Detection.
+Training, MLflow Experiment Tracking, and Artifact Persistence Pipeline for Time-Series Anomaly Detection.
 
-Orchestrates offline model training, anomaly threshold calculation, and artifact persistence:
+Orchestrates offline model training, experiment tracking with MLflow, anomaly threshold calculation, and artifact persistence:
   - Loads configuration parameters from config.yaml.
   - Reuses Phase 4 data preprocessing pipeline (no data leakage).
   - Prepares PyTorch DataLoaders for training and validation.
+  - Instruments experiment tracking using local file-based MLflow backend (./mlruns).
+  - Logs configuration parameters, per-epoch train/val loss metrics, and final metrics.
   - Trains PyTorch LSTMAutoencoder with MSE reconstruction loss.
   - Validates after each epoch using torch.no_grad().
   - Persists state_dict of the best model (lowest validation loss) to model.pth.
   - Reloads the best model and calculates per-sequence reconstruction errors on validation data.
   - Calculates percentile-based anomaly threshold and persists anomaly_threshold.npy.
   - Persists fitted StandardScaler object to scaler.joblib.
+  - Logs model.pth, scaler.joblib, and anomaly_threshold.npy to MLflow.
 """
 
 import os
 from typing import Dict, Any, Tuple
 import joblib
+import mlflow
 import numpy as np
 import yaml
 import torch
@@ -33,6 +37,18 @@ def load_config(config_path: str = "config.yaml") -> Dict[str, Any]:
     with open(config_path, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
     return config
+
+
+def flatten_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Flatten nested config dictionary into dot-separated keys for MLflow parameter logging."""
+    params = {}
+    for section, values in config.items():
+        if isinstance(values, dict):
+            for k, v in values.items():
+                params[f"{section}.{k}"] = v
+        else:
+            params[section] = values
+    return params
 
 
 def calculate_reconstruction_errors(
@@ -118,18 +134,7 @@ def train_model(
     config_path: str = "config.yaml",
 ) -> Tuple[float, int, float, str, str, str]:
     """
-    Main training pipeline execution function.
-
-    Steps:
-      1. Load config.yaml hyperparameters and artifact paths.
-      2. Preprocess data (chronological split, fit scaler on train ONLY, create sequences).
-      3. Create PyTorch DataLoaders.
-      4. Train LSTMAutoencoder and track best validation reconstruction loss.
-      5. Save best model state dict to model.pth.
-      6. Reload best model state dict into eval mode.
-      7. Calculate per-sequence validation reconstruction errors.
-      8. Calculate percentile threshold and save anomaly_threshold.npy.
-      9. Save fitted scaler to scaler.joblib.
+    Main training pipeline execution function with MLflow experiment tracking.
 
     Returns:
         Tuple[float, int, float, str, str, str]:
@@ -142,6 +147,7 @@ def train_model(
     train_cfg = config["training"]
     anomaly_cfg = config["anomaly"]
     artifact_cfg = config["artifacts"]
+    mlflow_cfg = config.get("mlflow", {})
 
     csv_path = data_cfg["path"]
     value_column = data_cfg["value_column"]
@@ -161,6 +167,14 @@ def train_model(
     model_path = artifact_cfg["model_path"]
     scaler_path = artifact_cfg["scaler_path"]
     threshold_path = artifact_cfg["threshold_path"]
+
+    experiment_name = mlflow_cfg.get("experiment_name", "time-series-anomaly-detection")
+
+    # Configure local MLflow tracking URI explicitly
+    local_mlruns_path = os.path.abspath("./mlruns")
+    os.makedirs(local_mlruns_path, exist_ok=True)
+    mlflow.set_tracking_uri(f"file:///{local_mlruns_path.replace(os.sep, '/')}")
+    mlflow.set_experiment(experiment_name)
 
     # 1. Preprocess data (reusing Phase 4 pipeline; scaler fit on train ONLY)
     train_seq, val_seq, scaler = prepare_data(
@@ -204,92 +218,118 @@ def train_model(
     print(f"Starting training on device: {device}")
     print(f"Hyperparameters: epochs={epochs}, batch_size={batch_size}, lr={learning_rate}, window_size={window_size}")
 
-    for epoch in range(1, epochs + 1):
-        # Training Phase
-        model.train()
-        total_train_loss = 0.0
-        total_train_samples = 0
+    with mlflow.start_run(run_name="lstm-autoencoder-training"):
+        # Log all configuration parameters to MLflow
+        flat_params = flatten_config(config)
+        mlflow.log_params(flat_params)
 
-        for (batch_x,) in train_loader:
-            batch_x = batch_x.to(device)
-            optimizer.zero_grad()
+        for epoch in range(1, epochs + 1):
+            # Training Phase
+            model.train()
+            total_train_loss = 0.0
+            total_train_samples = 0
 
-            reconstruction = model(batch_x)
-            loss = criterion(reconstruction, batch_x)
-
-            loss.backward()
-            optimizer.step()
-
-            current_batch_size = batch_x.size(0)
-            total_train_loss += loss.item() * current_batch_size
-            total_train_samples += current_batch_size
-
-        epoch_train_loss = total_train_loss / total_train_samples
-
-        # Validation Phase
-        model.eval()
-        total_val_loss = 0.0
-        total_val_samples = 0
-
-        with torch.no_grad():
-            for (batch_x,) in val_loader:
+            for (batch_x,) in train_loader:
                 batch_x = batch_x.to(device)
+                optimizer.zero_grad()
+
                 reconstruction = model(batch_x)
                 loss = criterion(reconstruction, batch_x)
 
+                loss.backward()
+                optimizer.step()
+
                 current_batch_size = batch_x.size(0)
-                total_val_loss += loss.item() * current_batch_size
-                total_val_samples += current_batch_size
+                total_train_loss += loss.item() * current_batch_size
+                total_train_samples += current_batch_size
 
-        epoch_val_loss = total_val_loss / total_val_samples
+            epoch_train_loss = total_train_loss / total_train_samples
 
-        print(
-            f"Epoch [{epoch:02d}/{epochs:02d}] - Train Loss: {epoch_train_loss:.6f} | Val Loss: {epoch_val_loss:.6f}"
+            # Validation Phase
+            model.eval()
+            total_val_loss = 0.0
+            total_val_samples = 0
+
+            with torch.no_grad():
+                for (batch_x,) in val_loader:
+                    batch_x = batch_x.to(device)
+                    reconstruction = model(batch_x)
+                    loss = criterion(reconstruction, batch_x)
+
+                    current_batch_size = batch_x.size(0)
+                    total_val_loss += loss.item() * current_batch_size
+                    total_val_samples += current_batch_size
+
+            epoch_val_loss = total_val_loss / total_val_samples
+
+            # Log per-epoch metrics to MLflow
+            mlflow.log_metrics(
+                {"train_loss": epoch_train_loss, "val_loss": epoch_val_loss},
+                step=epoch,
+            )
+
+            print(
+                f"Epoch [{epoch:02d}/{epochs:02d}] - Train Loss: {epoch_train_loss:.6f} | Val Loss: {epoch_val_loss:.6f}"
+            )
+
+            # Save best model based on validation loss
+            if epoch_val_loss < best_val_loss:
+                best_val_loss = epoch_val_loss
+                best_epoch = epoch
+                torch.save(model.state_dict(), model_path)
+
+        print("\nTraining complete.")
+        print(f"Best Validation Loss: {best_val_loss:.6f} (Epoch {best_epoch})")
+        print(f"Best model state dict saved to: {model_path}")
+
+        # 6. Reload BEST model for post-training threshold calculation
+        best_model = LSTMAutoencoder(
+            input_dim=input_dim,
+            hidden_dim=hidden_dim,
+            num_layers=num_layers,
+        ).to(device)
+
+        state_dict = torch.load(model_path, map_location=device, weights_only=True)
+        best_model.load_state_dict(state_dict)
+        best_model.eval()
+
+        # 7. Calculate per-sequence validation reconstruction errors
+        val_errors = calculate_reconstruction_errors(best_model, val_loader, device)
+
+        # 8. Calculate anomaly threshold
+        threshold = calculate_anomaly_threshold(val_errors, threshold_percentile)
+
+        # 9. Persist scaler and threshold artifacts
+        save_artifacts(scaler, scaler_path, threshold, threshold_path)
+
+        # 10. Log final metrics and artifacts to MLflow
+        mlflow.log_metrics(
+            {
+                "best_val_loss": best_val_loss,
+                "best_epoch": float(best_epoch),
+                "anomaly_threshold": threshold,
+            }
         )
 
-        # Save best model based on validation loss
-        if epoch_val_loss < best_val_loss:
-            best_val_loss = epoch_val_loss
-            best_epoch = epoch
-            torch.save(model.state_dict(), model_path)
+        mlflow.log_artifact(model_path)
+        mlflow.log_artifact(scaler_path)
+        mlflow.log_artifact(threshold_path)
 
-    print("\nTraining complete.")
-    print(f"Best Validation Loss: {best_val_loss:.6f} (Epoch {best_epoch})")
-    print(f"Best model state dict saved to: {model_path}")
+        print("\nValidation Reconstruction Errors Analysis:")
+        print(f"  Count: {len(val_errors)}")
+        print(f"  Min Error:    {np.min(val_errors):.6f}")
+        print(f"  Max Error:    {np.max(val_errors):.6f}")
+        print(f"  Mean Error:   {np.mean(val_errors):.6f}")
+        print(f"  Median Error: {np.median(val_errors):.6f}")
 
-    # 6. Reload BEST model for post-training threshold calculation
-    best_model = LSTMAutoencoder(
-        input_dim=input_dim,
-        hidden_dim=hidden_dim,
-        num_layers=num_layers,
-    ).to(device)
-    
-    state_dict = torch.load(model_path, map_location=device, weights_only=True)
-    best_model.load_state_dict(state_dict)
-    best_model.eval()
-
-    # 7. Calculate per-sequence validation reconstruction errors
-    val_errors = calculate_reconstruction_errors(best_model, val_loader, device)
-
-    # 8. Calculate anomaly threshold
-    threshold = calculate_anomaly_threshold(val_errors, threshold_percentile)
-
-    # 9. Persist scaler and threshold artifacts
-    save_artifacts(scaler, scaler_path, threshold, threshold_path)
-
-    print("\nValidation Reconstruction Errors Analysis:")
-    print(f"  Count: {len(val_errors)}")
-    print(f"  Min Error:    {np.min(val_errors):.6f}")
-    print(f"  Max Error:    {np.max(val_errors):.6f}")
-    print(f"  Mean Error:   {np.mean(val_errors):.6f}")
-    print(f"  Median Error: {np.median(val_errors):.6f}")
-
-    print("\nArtifact Persistence Summary:")
-    print(f"  Threshold Percentile: {threshold_percentile}%")
-    print(f"  Calculated Anomaly Threshold: {threshold:.6f}")
-    print(f"  Model Artifact: {model_path}")
-    print(f"  Scaler Artifact: {scaler_path}")
-    print(f"  Threshold Artifact: {threshold_path}")
+        print("\nMLflow Experiment Tracking & Artifact Summary:")
+        print(f"  Experiment Name: {experiment_name}")
+        print(f"  Run ID: {mlflow.active_run().info.run_id}")
+        print(f"  Threshold Percentile: {threshold_percentile}%")
+        print(f"  Calculated Anomaly Threshold: {threshold:.6f}")
+        print(f"  Model Artifact: {model_path}")
+        print(f"  Scaler Artifact: {scaler_path}")
+        print(f"  Threshold Artifact: {threshold_path}")
 
     return best_val_loss, best_epoch, threshold, model_path, scaler_path, threshold_path
 
