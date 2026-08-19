@@ -218,7 +218,7 @@ def train_model(
     print(f"Starting training on device: {device}")
     print(f"Hyperparameters: epochs={epochs}, batch_size={batch_size}, lr={learning_rate}, window_size={window_size}")
 
-    with mlflow.start_run(run_name="lstm-autoencoder-training"):
+    with mlflow.start_run(run_name="lstm-autoencoder-training") as active_run:
         # Log all configuration parameters to MLflow
         flat_params = flatten_config(config)
         mlflow.log_params(flat_params)
@@ -324,7 +324,7 @@ def train_model(
 
         print("\nMLflow Experiment Tracking & Artifact Summary:")
         print(f"  Experiment Name: {experiment_name}")
-        print(f"  Run ID: {mlflow.active_run().info.run_id}")
+        print(f"  Run ID: {active_run.info.run_id}")
         print(f"  Threshold Percentile: {threshold_percentile}%")
         print(f"  Calculated Anomaly Threshold: {threshold:.6f}")
         print(f"  Model Artifact: {model_path}")

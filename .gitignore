@@ -17,8 +17,11 @@ __pycache__/
 .coverage
 htmlcov/
 
+# MLflow Tracking Directory (Keep folder structure, ignore generated local runs)
+mlruns/*
+!mlruns/.gitkeep
+
 # IDE & Editor Settings
-.vscode/
 .idea/
 *.swp
 *.swo
