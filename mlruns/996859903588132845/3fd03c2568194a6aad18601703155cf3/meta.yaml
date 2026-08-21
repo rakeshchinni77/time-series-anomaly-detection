@@ -1,0 +1,15 @@
+artifact_uri: file:///C:/Users/rakes/time-series-anomaly-detection/mlruns/996859903588132845/3fd03c2568194a6aad18601703155cf3/artifacts
+end_time: 1786971109817
+entry_point_name: ''
+experiment_id: '996859903588132845'
+lifecycle_stage: active
+run_id: 3fd03c2568194a6aad18601703155cf3
+run_name: lstm-autoencoder-training
+run_uuid: 3fd03c2568194a6aad18601703155cf3
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1786971088321
+status: 3
+tags: []
+user_id: rakes
